@@ -32,6 +32,7 @@ type Router struct {
 	pluginChain   *plugins.PluginChain
 	subChans      map[string]chan *rtp.Packet
 	subShutdownCh chan string
+	rembChan      chan *rtcp.ReceiverEstimatedMaximumBitrate
 }
 
 // NewRouter return a new Router
@@ -43,6 +44,7 @@ func NewRouter(id string) *Router {
 		pluginChain:   plugins.NewPluginChain(id),
 		subChans:      make(map[string]chan *rtp.Packet),
 		subShutdownCh: make(chan string, 1),
+		rembChan:      make(chan *rtcp.ReceiverEstimatedMaximumBitrate),
 	}
 }
 
@@ -55,6 +57,7 @@ func (r *Router) InitPlugins(config plugins.Config) error {
 }
 
 func (r *Router) start() {
+	go r.rembLoop()
 	go func() {
 		defer util.Recover("[Router.start]")
 		for {
@@ -153,7 +156,58 @@ func (r *Router) subWriteLoop(subID string, trans transport.Transport) {
 	log.Infof("Closing sub writer")
 }
 
+func (r *Router) rembLoop() {
+	lastRembTime := time.Now()
+	maxRembTime := 200 * time.Millisecond
+	var rembMin uint64 = 100000
+	var lowest uint64 = 99999999999999999
+	var rembCount, rembTotalRate uint64
+
+	for pkt := range r.rembChan {
+		// Update stats
+		rembCount++
+		rembTotalRate += pkt.Bitrate
+		if pkt.Bitrate < lowest {
+			lowest = pkt.Bitrate
+		}
+
+		// Send upstream if time
+		if time.Since(lastRembTime) > maxRembTime {
+			lastRembTime = time.Now()
+			avg := uint64(rembTotalRate / rembCount)
+
+			_ = avg
+			target := lowest // or lowest
+
+			if target < rembMin {
+				target = rembMin
+			}
+
+			newPkt := &rtcp.ReceiverEstimatedMaximumBitrate{
+				Bitrate:    target,
+				SenderSSRC: 1,
+				SSRCs:      pkt.SSRCs,
+			}
+
+			log.Infof("Router.rembLoop send REMB: %+v", newPkt)
+
+			if r.GetPub() != nil {
+				err := r.GetPub().WriteRTCP(newPkt)
+				if err != nil {
+					log.Errorf("Router.AddSub REMB err => %+v", err)
+				}
+			}
+
+			// Reset stats
+			rembCount = 0
+			rembTotalRate = 0
+			lowest = 99999999999999999
+		}
+	}
+}
+
 func (r *Router) subFeedbackLoop(subID string, trans transport.Transport) {
+
 	for pkt := range trans.GetRTCPChan() {
 		if r.stop {
 			break
@@ -168,6 +222,9 @@ func (r *Router) subFeedbackLoop(subID string, trans transport.Transport) {
 					log.Errorf("Router.AddSub pli err => %+v", err)
 				}
 			}
+		case *rtcp.ReceiverEstimatedMaximumBitrate:
+			log.Infof("Router.AddSub %v got REMB: %+v", subID, pkt)
+			r.rembChan <- pkt
 		case *rtcp.TransportLayerNack:
 			// log.Infof("Router.AddSub got nack: %+v", pkt)
 			nack := pkt
