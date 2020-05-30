@@ -10,8 +10,10 @@ on = true
 
 [plugins.jitterbuffer]
 on = true
+# transport-cc (experiment feature)
+tccon = false
 # the remb cycle sending to pub, this told the pub it's bandwidth
-rembcycle = 2
+rembcycle = 0
 # pli cycle sending to pub, and pub will send a key frame
 plicycle = 1
 # this limit the remb bandwidth
